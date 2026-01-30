@@ -31,15 +31,26 @@
 
         // --- CONFIGURATION ---
         // REPLACE THESE WITH YOUR SUPABASE/FIREBASE DETAILS
-        const firebaseConfig = {
-            apiKey: "AIzaSyD_D8K-d74C6IN7ZN7VE1KzKAHWCgc1fc",
-            authDomain: "skirentalpro.firebaseapp.com",
-            projectId: "skirentalpro",
-            storageBucket: "skirentalpro.firebasestorage.app",
-            messagingSenderId: "701788497633",
-            appId: "1:701788497633:web:761d6d04f2496344ebb9a0"
-        };
 
+
+// Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyD_D8K-d74C6IN7ZN7VE1kZvKAHwCGc1fc",
+  authDomain: "skirentalpro.firebaseapp.com",
+  projectId: "skirentalpro",
+  storageBucket: "skirentalpro.firebasestorage.app",
+  messagingSenderId: "701788497633",
+  appId: "1:701788497633:web:761d6d04f2496344ebb9a0"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+        
         // Initialize Firebase
         firebase.initializeApp(firebaseConfig);
         const auth = firebase.auth();
