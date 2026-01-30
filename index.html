@@ -1,0 +1,755 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { 
+  Plus, 
+  Search, 
+  ChevronRight, 
+  History, 
+  Trash2, 
+  Archive, 
+  X, 
+  User, 
+  Clock, 
+  Package,
+  Calendar,
+  ArrowRightLeft,
+  Filter
+} from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  onSnapshot, 
+  query, 
+  where,
+  orderBy,
+  getDocs,
+  setDoc,
+  serverTimestamp
+} from 'firebase/firestore';
+import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+
+// --- CONFIGURATION & INITIALIZATION ---
+// Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyD_D8K-d74C6IN7ZN7VE1kZvKAHwCGc1fc",
+  authDomain: "skirentalpro.firebaseapp.com",
+  projectId: "skirentalpro",
+  storageBucket: "skirentalpro.firebasestorage.app",
+  messagingSenderId: "701788497633",
+  appId: "1:701788497633:web:761d6d04f2496344ebb9a0"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'ski-rental-default';
+
+// --- CONSTANTS ---
+const GEAR_TYPES = [
+  { id: 'ski', label: 'СКИИ', emoji: '🎿' },
+  { id: 'board', label: 'БОРД', emoji: '🏂' },
+  { id: 'sleigh', label: 'САНКА', emoji: '🛷' },
+  { id: 'poles', label: 'СТАПОВИ', emoji: '🦯' },
+  { id: 'boots', label: 'КОНД.', emoji: '⛸️' },
+  { id: 'helmet', label: 'КАЦИГА', emoji: '🪖' },
+  { id: 'goggles', label: 'НАОЧАРИ', emoji: '🥽' },
+  { id: 'gloves', label: 'РАКВИЦИ', emoji: '🧤' }
+];
+
+const STATUSES = {
+  AVAILABLE: 'Available',
+  RENTED: 'Rented',
+  ARCHIVED: 'Archived'
+};
+
+// --- TRANSLITERATION UTILITY ---
+const transliterate = (text) => {
+  if (!text) return "";
+  const map = {
+    'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ж': 'zh', 'з': 'z',
+    'и': 'i', 'ј': 'j', 'к': 'k', 'л': 'l', 'љ': 'lj', 'м': 'm', 'н': 'n', 'њ': 'nj',
+    'о': 'o', 'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'ќ': 'kj', 'у': 'u', 'ф': 'f',
+    'х': 'h', 'ц': 'c', 'ч': 'ch', 'џ': 'dz', 'ш': 'sh',
+    'a': 'а', 'b': 'б', 'v': 'в', 'g': 'г', 'd': 'д', 'e': 'е', 'z': 'з', 'i': 'и',
+    'j': 'ј', 'k': 'к', 'l': 'л', 'm': 'м', 'n': 'н', 'o': 'о', 'p': 'п', 'r': 'р',
+    's': 'с', 't': 'т', 'u': 'у', 'f': 'ф', 'h': 'х', 'c': 'ц'
+  };
+  return text.toLowerCase().split('').map(char => map[char] || char).join('');
+};
+
+const matchesSearch = (text, searchTerm) => {
+  if (!searchTerm) return true;
+  const normalizedText = transliterate(text);
+  const normalizedSearch = transliterate(searchTerm);
+  return normalizedText.includes(normalizedSearch) || text.toLowerCase().includes(searchTerm.toLowerCase());
+};
+
+// --- MAIN APP COMPONENT ---
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [activeTab, setActiveTab] = useState('GEAR');
+  const [gear, setGear] = useState([]);
+  const [clients, setClients] = useState([]);
+  const [history, setHistory] = useState([]);
+  const [searchFilter, setSearchFilter] = useState('');
+  const [historyClientFilter, setHistoryClientFilter] = useState(null);
+
+  // Modals
+  const [modalType, setModalType] = useState(null); // 'ADD_GEAR', 'GEAR_DETAILS', 'RENT_GEAR', 'CLIENT_DETAILS', 'ADD_CLIENT'
+  const [selectedItem, setSelectedItem] = useState(null);
+
+  // Firestore Collections
+  const gearCol = collection(db, 'artifacts', appId, 'public', 'data', 'gear');
+  const clientsCol = collection(db, 'artifacts', appId, 'public', 'data', 'clients');
+  const historyCol = collection(db, 'artifacts', appId, 'public', 'data', 'history');
+
+  // --- AUTH & DATA SYNC ---
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth error:", err);
+      }
+    };
+    initAuth();
+    const unsub = onAuthStateChanged(auth, setUser);
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const unsubGear = onSnapshot(gearCol, (snap) => {
+      setGear(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (err) => console.error("Gear fetch error:", err));
+
+    const unsubClients = onSnapshot(clientsCol, (snap) => {
+      setClients(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (err) => console.error("Clients fetch error:", err));
+
+    const unsubHistory = onSnapshot(historyCol, (snap) => {
+      const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      setHistory(data.sort((a, b) => b.timestamp?.seconds - a.timestamp?.seconds));
+    }, (err) => console.error("History fetch error:", err));
+
+    return () => {
+      unsubGear();
+      unsubClients();
+      unsubHistory();
+    };
+  }, [user]);
+
+  // --- ACTIONS ---
+  const addGear = async (data) => {
+    const nextId = gear.length > 0 
+      ? `#${String(Math.max(...gear.map(g => parseInt(g.gearId?.replace('#', '') || 0))) + 1).padStart(3, '0')}`
+      : '#001';
+    await addDoc(gearCol, { ...data, gearId: nextId, status: STATUSES.AVAILABLE });
+    setModalType(null);
+  };
+
+  const updateGear = async (id, data) => {
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'gear', id), data);
+    setModalType(null);
+  };
+
+  const deleteGear = async (id) => {
+    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'gear', id));
+    setModalType(null);
+  };
+
+  const addClient = async (data) => {
+    await addDoc(clientsCol, { ...data, clientId: `C-${Math.floor(1000 + Math.random() * 9000)}` });
+    setModalType(null);
+  };
+
+  const updateClient = async (id, data) => {
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'clients', id), data);
+    setModalType(null);
+  };
+
+  const deleteClient = async (id) => {
+    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'clients', id));
+    setModalType(null);
+  };
+
+  const rentGear = async (gearItem, clientItem) => {
+    const now = new Date();
+    const timestamp = now.toLocaleString('en-GB', { day: '2-digit', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    
+    // Update Gear
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'gear', gearItem.id), {
+      status: STATUSES.RENTED,
+      rentedToId: clientItem.id,
+      rentedToName: `${clientItem.name} ${clientItem.surname}`,
+      rentedAt: timestamp
+    });
+
+    // Add History
+    await addDoc(historyCol, {
+      type: 'RENT',
+      gearId: gearItem.id,
+      gearName: gearItem.name,
+      gearInternalId: gearItem.gearId,
+      clientId: clientItem.id,
+      clientName: `${clientItem.name} ${clientItem.surname}`,
+      clientPhone: clientItem.phone,
+      timestamp: serverTimestamp(),
+      displayDate: timestamp
+    });
+
+    setModalType(null);
+  };
+
+  const returnGear = async (gearItem) => {
+    const now = new Date();
+    const timestamp = now.toLocaleString('en-GB', { day: '2-digit', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+    // Add History
+    await addDoc(historyCol, {
+      type: 'RETURN',
+      gearId: gearItem.id,
+      gearName: gearItem.name,
+      gearInternalId: gearItem.gearId,
+      clientId: gearItem.rentedToId,
+      clientName: gearItem.rentedToName,
+      timestamp: serverTimestamp(),
+      displayDate: timestamp
+    });
+
+    // Update Gear
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'gear', gearItem.id), {
+      status: STATUSES.AVAILABLE,
+      rentedToId: null,
+      rentedToName: null,
+      rentedAt: null
+    });
+  };
+
+  // --- SUB-COMPONENTS ---
+
+  const Modal = ({ title, children, onClose }) => (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-3xl w-full max-w-md overflow-hidden shadow-2xl animate-in fade-in zoom-in duration-200">
+        <div className="p-6 border-b border-gray-100 flex justify-between items-center">
+          <h2 className="text-xl font-bold text-gray-800">{title}</h2>
+          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-full transition-colors">
+            <X size={24} className="text-gray-500" />
+          </button>
+        </div>
+        <div className="p-6 max-h-[70vh] overflow-y-auto">
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+
+  const GearCard = ({ item }) => {
+    const isRented = item.status === STATUSES.RENTED;
+    const typeInfo = GEAR_TYPES.find(t => t.id === item.type) || GEAR_TYPES[0];
+
+    return (
+      <div className={`rounded-3xl p-5 mb-4 border transition-all ${
+        isRented ? 'bg-red-50 border-red-200' : 'bg-emerald-50 border-emerald-200'
+      }`}>
+        <div className="flex justify-between items-start mb-2">
+          <div className="flex items-center gap-2 text-xs font-bold text-gray-500 uppercase tracking-wider">
+            <span>{typeInfo.emoji} {typeInfo.label}</span>
+          </div>
+          <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-tighter ${
+            item.status === STATUSES.AVAILABLE ? 'bg-emerald-200 text-emerald-800' : 
+            item.status === STATUSES.RENTED ? 'bg-red-200 text-red-800' : 'bg-gray-200 text-gray-800'
+          }`}>
+            {item.status}
+          </span>
+        </div>
+
+        <h3 
+          className="text-lg font-bold text-gray-900 leading-tight cursor-pointer hover:underline"
+          onClick={() => { setSelectedItem(item); setModalType('GEAR_DETAILS'); }}
+        >
+          {item.name}
+        </h3>
+        <p className="text-sm text-gray-500 mb-4">{item.gearId}</p>
+
+        {isRented && (
+          <div className="mb-4 space-y-2 pt-2 border-t border-red-100">
+            <div className="flex items-center gap-2 text-red-700 text-sm">
+              <Calendar size={14} />
+              <span>{item.rentedAt}</span>
+            </div>
+            <div 
+              className="flex items-center gap-2 text-red-800 text-sm font-bold cursor-pointer hover:underline"
+              onClick={() => {
+                const client = clients.find(c => c.id === item.rentedToId);
+                if (client) { setSelectedItem(client); setModalType('CLIENT_DETAILS'); }
+              }}
+            >
+              <User size={14} />
+              <span>{item.rentedToName}</span>
+            </div>
+          </div>
+        )}
+
+        <button
+          onClick={() => isRented ? returnGear(item) : (setSelectedItem(item), setModalType('RENT_GEAR'))}
+          className={`w-full py-3 rounded-2xl font-black uppercase tracking-widest text-white shadow-lg transition-transform active:scale-95 ${
+            isRented ? 'bg-red-600 hover:bg-red-700 shadow-red-200' : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-200'
+          }`}
+        >
+          {isRented ? 'Return Gear' : 'Rent Gear'}
+        </button>
+      </div>
+    );
+  };
+
+  const ClientCard = ({ item }) => {
+    const rentedGear = gear.filter(g => g.rentedToId === item.id);
+    const hasActiveRentals = rentedGear.length > 0;
+
+    return (
+      <div 
+        className={`rounded-3xl p-5 mb-4 border transition-all ${
+          hasActiveRentals ? 'bg-red-50 border-red-200' : 'bg-emerald-50 border-emerald-200'
+        }`}
+        onClick={() => { setSelectedItem(item); setModalType('CLIENT_DETAILS'); }}
+      >
+        <div className="flex justify-between items-start mb-1">
+          <h3 className="text-lg font-bold text-gray-900">{item.name} {item.surname}</h3>
+          <span className="text-xs font-mono bg-white/50 px-2 py-1 rounded-lg border border-gray-100">{item.clientId}</span>
+        </div>
+        <p className="text-sm text-gray-600 mb-4">{item.phone}</p>
+
+        {hasActiveRentals && (
+          <div className="space-y-1 pt-3 border-t border-red-100">
+            {rentedGear.map(g => {
+              const type = GEAR_TYPES.find(t => t.id === g.type);
+              return (
+                <div key={g.id} className="text-[11px] flex items-center gap-1 text-red-800 font-medium">
+                  <span className="opacity-70">{g.rentedAt}</span>
+                  <span>{type?.emoji} {type?.label} - {g.name}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // --- VIEWS ---
+
+  const GearView = () => {
+    const [typeFilter, setTypeFilter] = useState('ALL');
+    const [statusFilter, setStatusFilter] = useState('ALL');
+
+    const filteredGear = gear.filter(g => {
+      const matchSearch = matchesSearch(g.name, searchFilter) || matchesSearch(g.gearId, searchFilter);
+      const matchType = typeFilter === 'ALL' || g.type === typeFilter;
+      const matchStatus = statusFilter === 'ALL' || g.status === statusFilter;
+      return matchSearch && matchType && matchStatus;
+    });
+
+    return (
+      <div className="p-4 pb-24">
+        <div className="sticky top-0 bg-gray-50 z-10 pt-2 pb-4 space-y-3">
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
+              <input 
+                type="text" 
+                placeholder="Search gear..." 
+                className="w-full bg-white border-none rounded-2xl py-3 pl-10 pr-4 shadow-sm focus:ring-2 focus:ring-emerald-500 text-sm"
+                value={searchFilter}
+                onChange={e => setSearchFilter(e.target.value)}
+              />
+            </div>
+            <button 
+              onClick={() => setModalType('ADD_GEAR')}
+              className="bg-emerald-600 text-white p-3 rounded-2xl shadow-lg shadow-emerald-100 active:scale-95 transition-transform"
+            >
+              <Plus size={24} />
+            </button>
+          </div>
+          <div className="flex gap-2">
+            <select 
+              className="flex-1 bg-white border-none rounded-xl py-2 px-3 shadow-sm text-sm"
+              value={typeFilter}
+              onChange={e => setTypeFilter(e.target.value)}
+            >
+              <option value="ALL">All Types</option>
+              {GEAR_TYPES.map(t => <option key={t.id} value={t.id}>{t.emoji} {t.label}</option>)}
+            </select>
+            <select 
+              className="flex-1 bg-white border-none rounded-xl py-2 px-3 shadow-sm text-sm"
+              value={statusFilter}
+              onChange={e => setStatusFilter(e.target.value)}
+            >
+              <option value="ALL">All Status</option>
+              {Object.values(STATUSES).map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+        </div>
+
+        {filteredGear.map(item => <GearCard key={item.id} item={item} />)}
+        {filteredGear.length === 0 && (
+          <div className="text-center py-20 text-gray-400">
+            <Package size={48} className="mx-auto mb-2 opacity-20" />
+            <p>No gear found matching filters.</p>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const ClientsView = () => {
+    const filteredClients = clients.filter(c => 
+      matchesSearch(c.name, searchFilter) || 
+      matchesSearch(c.surname, searchFilter) || 
+      matchesSearch(c.phone, searchFilter)
+    );
+
+    return (
+      <div className="p-4 pb-24">
+        <div className="sticky top-0 bg-gray-50 z-10 pt-2 pb-4 flex gap-2">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
+            <input 
+              type="text" 
+              placeholder="Search clients..." 
+              className="w-full bg-white border-none rounded-2xl py-3 pl-10 pr-4 shadow-sm focus:ring-2 focus:ring-blue-500 text-sm"
+              value={searchFilter}
+              onChange={e => setSearchFilter(e.target.value)}
+            />
+          </div>
+          <button 
+            onClick={() => setModalType('ADD_CLIENT')}
+            className="bg-blue-600 text-white p-3 rounded-2xl shadow-lg shadow-blue-100 active:scale-95 transition-transform"
+          >
+            <Plus size={24} />
+          </button>
+        </div>
+        {filteredClients.map(item => <ClientCard key={item.id} item={item} />)}
+      </div>
+    );
+  };
+
+  const HistoryView = () => {
+    const filteredHistory = history.filter(h => {
+      const target = historyClientFilter || searchFilter;
+      if (!target) return true;
+      return matchesSearch(h.clientName, target) || 
+             matchesSearch(h.gearName, target) || 
+             matchesSearch(h.gearInternalId, target) || 
+             matchesSearch(h.clientPhone || '', target);
+    });
+
+    return (
+      <div className="p-4 pb-24">
+        <div className="sticky top-0 bg-gray-50 z-10 pt-2 pb-4">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
+            <input 
+              type="text" 
+              placeholder="Filter history..." 
+              className="w-full bg-white border-none rounded-2xl py-3 pl-10 pr-10 shadow-sm focus:ring-2 focus:ring-orange-500 text-sm"
+              value={historyClientFilter || searchFilter}
+              onChange={e => {
+                setSearchFilter(e.target.value);
+                setHistoryClientFilter(null);
+              }}
+            />
+            {historyClientFilter && (
+              <button 
+                onClick={() => setHistoryClientFilter(null)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 bg-gray-200 rounded-full p-1"
+              >
+                <X size={12} />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {filteredHistory.map(item => (
+          <div key={item.id} className="bg-white rounded-2xl p-4 mb-3 shadow-sm border border-gray-100 flex items-center gap-4">
+            <div className={`p-3 rounded-full ${item.type === 'RENT' ? 'bg-blue-50 text-blue-500' : 'bg-orange-50 text-orange-500'}`}>
+              <ArrowRightLeft size={20} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex justify-between items-center mb-1">
+                <span className={`text-[10px] font-black px-2 py-0.5 rounded-md uppercase tracking-wider ${
+                  item.type === 'RENT' ? 'bg-blue-100 text-blue-700' : 'bg-orange-100 text-orange-700'
+                }`}>
+                  {item.type}
+                </span>
+                <span className="text-[10px] text-gray-400">{item.displayDate}</span>
+              </div>
+              <h4 className="font-bold text-gray-900 truncate">{item.gearName}</h4>
+              <p className="text-xs text-gray-500 truncate">{item.clientName} {item.clientPhone ? `(${item.clientPhone})` : ''}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  // --- MODAL CONTENT ---
+
+  const AddGearModal = () => {
+    const [name, setName] = useState('');
+    const [type, setType] = useState('ski');
+    return (
+      <div className="space-y-4">
+        <div>
+          <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Gear Name</label>
+          <input value={name} onChange={e => setName(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500 border-none" placeholder="e.g. Head V-Shape V6" />
+        </div>
+        <div>
+          <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Gear Type</label>
+          <select value={type} onChange={e => setType(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl border-none outline-none focus:ring-2 focus:ring-emerald-500">
+            {GEAR_TYPES.map(t => <option key={t.id} value={t.id}>{t.emoji} {t.label}</option>)}
+          </select>
+        </div>
+        <button onClick={() => addGear({ name, type })} className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold shadow-lg shadow-emerald-100 mt-4">Save Gear</button>
+      </div>
+    );
+  };
+
+  const GearDetailsModal = () => {
+    const [name, setName] = useState(selectedItem?.name || '');
+    const [type, setType] = useState(selectedItem?.type || 'ski');
+    const [status, setStatus] = useState(selectedItem?.status || STATUSES.AVAILABLE);
+
+    return (
+      <div className="space-y-4">
+        <div>
+          <label className="block text-xs font-bold text-gray-400 uppercase mb-1">ID</label>
+          <input value={selectedItem?.gearId} disabled className="w-full p-3 bg-gray-100 text-gray-400 rounded-xl border-none" />
+        </div>
+        <div>
+          <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Name</label>
+          <input value={name} onChange={e => setName(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500 border-none" />
+        </div>
+        <div>
+          <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Type</label>
+          <select value={type} onChange={e => setType(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl border-none">
+            {GEAR_TYPES.map(t => <option key={t.id} value={t.id}>{t.emoji} {t.label}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Status</label>
+          <select value={status} onChange={e => setStatus(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl border-none">
+            {Object.values(STATUSES).map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+        <div className="grid grid-cols-2 gap-3 mt-6">
+          <button 
+            onClick={() => updateGear(selectedItem.id, { name, type, status })}
+            className="col-span-2 py-4 bg-emerald-600 text-white rounded-2xl font-bold mb-2 shadow-lg"
+          >
+            Update Details
+          </button>
+          <button 
+            onClick={() => updateGear(selectedItem.id, { status: STATUSES.ARCHIVED })}
+            className="py-3 bg-gray-100 text-gray-600 rounded-2xl font-bold flex items-center justify-center gap-2"
+          >
+            <Archive size={18} /> Archive
+          </button>
+          <button 
+            onClick={() => deleteGear(selectedItem.id)}
+            className="py-3 bg-red-100 text-red-600 rounded-2xl font-bold flex items-center justify-center gap-2"
+          >
+            <Trash2 size={18} /> Delete
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const RentGearModal = () => {
+    const [clientSearch, setClientSearch] = useState('');
+    const matchingClients = clients.filter(c => 
+      matchesSearch(c.name, clientSearch) || matchesSearch(c.surname, clientSearch)
+    );
+
+    return (
+      <div className="space-y-4">
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
+          <input 
+            type="text" 
+            placeholder="Search client to rent..." 
+            className="w-full bg-gray-50 border-none rounded-xl py-3 pl-10 pr-4 focus:ring-2 focus:ring-emerald-500"
+            value={clientSearch}
+            onChange={e => setClientSearch(e.target.value)}
+          />
+        </div>
+        <div className="space-y-2 max-h-[300px] overflow-y-auto pr-2">
+          {matchingClients.map(c => (
+            <button 
+              key={c.id} 
+              onClick={() => rentGear(selectedItem, c)}
+              className="w-full p-4 bg-white border border-gray-100 rounded-2xl text-left hover:border-emerald-500 transition-colors flex justify-between items-center group"
+            >
+              <div>
+                <p className="font-bold text-gray-800">{c.name} {c.surname}</p>
+                <p className="text-xs text-gray-500">{c.phone}</p>
+              </div>
+              <ChevronRight size={18} className="text-gray-300 group-hover:text-emerald-500" />
+            </button>
+          ))}
+          {matchingClients.length === 0 && (
+            <button 
+              onClick={() => { setModalType('ADD_CLIENT'); setSelectedItem(null); }}
+              className="w-full p-4 bg-emerald-50 border-2 border-dashed border-emerald-200 rounded-2xl text-emerald-700 font-bold flex items-center justify-center gap-2"
+            >
+              <Plus size={18} /> Add New Client
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const ClientDetailsModal = () => {
+    const [name, setName] = useState(selectedItem?.name || '');
+    const [surname, setSurname] = useState(selectedItem?.surname || '');
+    const [phone, setPhone] = useState(selectedItem?.phone || '');
+    
+    const hasHistory = history.some(h => h.clientId === selectedItem?.id);
+
+    return (
+      <div className="space-y-4">
+        <div>
+          <label className="block text-xs font-bold text-gray-400 uppercase mb-1 text-right">{selectedItem?.clientId}</label>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Name</label>
+              <input value={name} onChange={e => setName(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl border-none outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Surname</label>
+              <input value={surname} onChange={e => setSurname(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl border-none outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+          </div>
+        </div>
+        <div>
+          <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Phone Number</label>
+          <input value={phone} onChange={e => setPhone(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl border-none outline-none focus:ring-2 focus:ring-blue-500" />
+        </div>
+        
+        <div className="grid grid-cols-2 gap-3 mt-6">
+          <button 
+            onClick={() => updateClient(selectedItem.id, { name, surname, phone })}
+            className="col-span-2 py-4 bg-blue-600 text-white rounded-2xl font-bold shadow-lg shadow-blue-100"
+          >
+            Save Changes
+          </button>
+          <button 
+            onClick={() => deleteClient(selectedItem.id)}
+            className="py-3 bg-red-100 text-red-600 rounded-2xl font-bold flex items-center justify-center gap-2"
+          >
+            <Trash2 size={18} /> Delete
+          </button>
+          {hasHistory && (
+            <button 
+              onClick={() => {
+                setHistoryClientFilter(`${selectedItem.name} ${selectedItem.surname}`);
+                setActiveTab('HISTORY');
+                setModalType(null);
+              }}
+              className="py-3 bg-orange-100 text-orange-600 rounded-2xl font-bold flex items-center justify-center gap-2"
+            >
+              <History size={18} /> History
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const AddClientModal = () => {
+    const [name, setName] = useState('');
+    const [surname, setSurname] = useState('');
+    const [phone, setPhone] = useState('');
+    return (
+      <div className="space-y-4">
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Name</label>
+            <input value={name} onChange={e => setName(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl border-none" placeholder="Petar" />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Surname</label>
+            <input value={surname} onChange={e => setSurname(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl border-none" placeholder="Petrovski" />
+          </div>
+        </div>
+        <div>
+          <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Phone Number</label>
+          <input value={phone} onChange={e => setPhone(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl border-none" placeholder="070123456" />
+        </div>
+        <button onClick={() => addClient({ name, surname, phone })} className="w-full py-4 bg-blue-600 text-white rounded-2xl font-bold shadow-lg shadow-blue-100 mt-4">Add Client</button>
+      </div>
+    );
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50 font-sans text-gray-900 overflow-x-hidden">
+      {/* View Content */}
+      <div className="max-w-md mx-auto min-h-screen relative">
+        <header className="px-6 pt-8 pb-2">
+          <h1 className="text-3xl font-black text-gray-900 tracking-tighter">
+            {activeTab}
+          </h1>
+        </header>
+
+        {activeTab === 'GEAR' && <GearView />}
+        {activeTab === 'CLIENTS' && <ClientsView />}
+        {activeTab === 'HISTORY' && <HistoryView />}
+
+        {/* Bottom Navigation */}
+        <nav className="fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-md border-t border-gray-100 px-6 py-4 flex justify-between items-center z-40 max-w-md mx-auto shadow-[0_-4px_20px_rgba(0,0,0,0.05)] rounded-t-[40px]">
+          <NavBtn icon={<Package size={22} />} label="GEAR" active={activeTab === 'GEAR'} onClick={() => {setActiveTab('GEAR'); setSearchFilter('');}} />
+          <NavBtn icon={<User size={22} />} label="CLIENTS" active={activeTab === 'CLIENTS'} onClick={() => {setActiveTab('CLIENTS'); setSearchFilter('');}} />
+          <NavBtn icon={<History size={22} />} label="HISTORY" active={activeTab === 'HISTORY'} onClick={() => {setActiveTab('HISTORY'); setSearchFilter('');}} />
+        </nav>
+      </div>
+
+      {/* Modals */}
+      {modalType === 'ADD_GEAR' && <Modal title="Add New Gear" onClose={() => setModalType(null)}><AddGearModal /></Modal>}
+      {modalType === 'GEAR_DETAILS' && <Modal title="Gear Details" onClose={() => setModalType(null)}><GearDetailsModal /></Modal>}
+      {modalType === 'RENT_GEAR' && <Modal title="Rent Out Equipment" onClose={() => setModalType(null)}><RentGearModal /></Modal>}
+      {modalType === 'CLIENT_DETAILS' && <Modal title="Client Details" onClose={() => setModalType(null)}><ClientDetailsModal /></Modal>}
+      {modalType === 'ADD_CLIENT' && <Modal title="New Client" onClose={() => setModalType(null)}><AddClientModal /></Modal>}
+    </div>
+  );
+}
+
+function NavBtn({ icon, label, active, onClick }) {
+  return (
+    <button 
+      onClick={onClick}
+      className={`flex flex-col items-center gap-1 transition-all duration-300 ${active ? 'text-blue-600 scale-110' : 'text-gray-400 hover:text-gray-600'}`}
+    >
+      <div className={`p-2 rounded-2xl transition-all ${active ? 'bg-blue-50' : 'bg-transparent'}`}>
+        {icon}
+      </div>
+      <span className="text-[10px] font-black tracking-widest uppercase">{label}</span>
+    </button>
+  );
+}
